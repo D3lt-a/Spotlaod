@@ -1,4 +1,3 @@
-
 # Spotload — Simple Spotify Playlist Downloader
 
 A small, personal GUI app for downloading audio from your Spotify playlists (for personal use). The project is organized into a small package so each part is easy to read and debug.
@@ -51,5 +50,3 @@ Notes & tips
 - UI: `customtkinter` gives a nicer look and enables high-DPI image scaling; otherwise the app uses `tkinter`.
 - History: Download history is stored at `~/.spotload/download_history.json`.
 - Legal: This tool downloads audio from third-party sources. Make sure you comply with Spotify's Terms of Service and copyright law. Use only for content you are allowed to download.
-
-If you want the UI split further, tests, or a CLI-only mode, tell me which and I’ll add it.

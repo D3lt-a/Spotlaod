@@ -1,6 +1,6 @@
 spotipy>=2.22.0
 yt-dlp>=2024.01.01
-mutagen>=1.46.0
+mutagen>=1.46.0 //Optional
 Pillow>=9.0.0
 requests>=2.28.0
 customtkinter>=5.0.0; platform_system != "Linux" or platform_python_implementation != "PyPy"

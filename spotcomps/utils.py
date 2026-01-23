@@ -16,7 +16,7 @@ CONFIG_FILE = APP_DIR / "config.json"
 HISTORY_FILE = APP_DIR / "download_history.json"
 
 DEFAULTS = {
-    "output_dir": str(Path.home() / "Downloads" / "SpotifyMusic"),
+    "output_dir": str(Path.home() / "Music" / "SpotifyMusic"),
     "concurrency": 3,
     "cache_path": str(APP_DIR / ".spotify_cache"),
     "client_id": "",
