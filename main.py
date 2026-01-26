@@ -31,7 +31,6 @@ def main():
             tk.Button(app, text="Download Selected", command=app.queue_download_selected).pack()
         except Exception:
             pass
-
     app.mainloop()
 
 if __name__ == "__main__":

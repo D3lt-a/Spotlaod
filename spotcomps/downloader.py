@@ -1,6 +1,10 @@
 """
 Downloader: yt-dlp worker queue and helpers.
 Sends events to an event_queue (dict messages) about completed/failed downloads.
+
+Downloader manages a thread pool consuming tasks placed on its internal queue.
+Each task is a dict with keys: idx, meta, total.
+Sends events (dict) to event_queue with type: completed, download_error, video_unavailable, private_video, ffmpeg_missing, failed
 """
 from __future__ import annotations
 from typing import Dict, Optional
@@ -12,11 +16,6 @@ from .utils import logger, sanitize_filename, ensure_dir
 from .tagging import tag_mp3_file
 
 class Downloader:
-    """
-    Downloader manages a thread pool consuming tasks placed on its internal queue.
-    Each task is a dict with keys: idx, meta, total.
-    Sends events (dict) to event_queue with type: completed, download_error, video_unavailable, private_video, ffmpeg_missing, failed
-    """
     def __init__(self, cfg: Dict, event_queue: "queue.Queue[Dict]"):
         self.cfg = cfg
         self.event_queue = event_queue
