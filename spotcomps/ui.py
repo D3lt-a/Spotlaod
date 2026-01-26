@@ -1,12 +1,20 @@
 """
 GUI: SpotloadApp. Depends on utils, spotify_client and downloader modules.
 Contains album-art caching, loading modal and bulk download UI.
+
+Updates:
+- Adds a generic `run_in_background` helper to show a loading modal for any
+  background action, report exceptions to the user, and run an optional callback
+  when the job completes. Replaces ad-hoc threading calls for playlist / track
+  loading with this helper.
+- Improves visible error reporting for download-related events (ffmpeg missing,
+  download errors, unavailable/private videos) so the UI notifies the user.
 """
 from __future__ import annotations
 import threading
 import queue
 import time
-from typing import Optional
+from typing import Optional, Callable, Any
 from pathlib import Path
 from io import BytesIO
 
@@ -33,7 +41,6 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
         self.history = load_history()
 
         self.sp_client = SpotifyClient(self.cfg)
-        self.sp = None  # spotipy client is inside sp_client.sp
 
         self.playlists = []
         self.current_playlist = None
@@ -58,6 +65,7 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
         self._loading_top: Optional[tk.Toplevel] = None
         self._loading_anim_handle = None
         self._loading_dots = 0
+        self._loading_message_base = ""
 
         self._build_ui()
         self.after(200, self._poll_event_queue)
@@ -89,7 +97,7 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
         btn_frame = ctk.CTkFrame(left)
         btn_frame.pack(fill="x", padx=6, pady=6)
         ctk.CTkButton(btn_frame, text="Connect Spotify", command=self.connect_spotify).pack(side="left", padx=4)
-        ctk.CTkButton(btn_frame, text="Load Playlists", command=self._load_playlists_with_ui).pack(side="left", padx=4)
+        ctk.CTkButton(btn_frame, text="Load Playlists", command=lambda: self.run_in_background(self._load_playlists_task, message="Loading playlists...")).pack(side="left", padx=4)
         ctk.CTkButton(btn_frame, text="Download Playlist (Audio)", command=self.download_playlist_audio).pack(side="left", padx=4)
         ctk.CTkButton(btn_frame, text="Export M3U", command=self._export_playlist_m3u).pack(side="left", padx=4)
 
@@ -122,7 +130,7 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
         self.playlist_listbox = tk.Listbox(frame)
         self.playlist_listbox.pack(fill="x")
         tk.Button(frame, text="Connect Spotify", command=self.connect_spotify).pack()
-        tk.Button(frame, text="Load Playlists", command=self._load_playlists_with_ui).pack()
+        tk.Button(frame, text="Load Playlists", command=lambda: self.run_in_background(self._load_playlists_task, message="Loading playlists...")).pack()
         tk.Button(frame, text="Download Playlist (Audio)", command=self.download_playlist_audio).pack()
         tk.Button(frame, text="Export M3U", command=self._export_playlist_m3u).pack()
         self.track_listbox = tk.Listbox(frame)
@@ -131,6 +139,37 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
         self.album_art_label.pack()
         self.log_text = tk.Text(self, height=6)
         self.log_text.pack(fill="x")
+
+    # ---------------- Runnable background helper ------------------
+    def run_in_background(
+        self,
+        func: Callable[..., Any],
+        args: tuple = (),
+        kwargs: Optional[dict] = None,
+        message: str = "Working...",
+        on_done: Optional[Callable[[Any], None]] = None,
+        show_error: bool = True
+    ):
+        """
+        Run `func(*args, **(kwargs or {}))` in a thread while showing the loading modal.
+        If the function returns a result and `on_done` is provided, `on_done(result)` is
+        called in the main thread. Exceptions are logged and optionally shown to the user.
+        """
+        self.show_loading(message)
+        def worker():
+            try:
+                res = func(*args, **(kwargs or {}))
+                if on_done:
+                    self.after(0, lambda r=res: on_done(r))
+            except Exception as e:
+                logger.exception("Background task failed: %s", e)
+                if show_error:
+                    # Show the error in the UI thread
+                    self.after(0, lambda: messagebox.showerror("Error", str(e)))
+            finally:
+                # always hide loading in UI thread
+                self.after(0, self.hide_loading)
+        threading.Thread(target=worker, daemon=True).start()
 
     # ---------------- Config & spotify -----------------
     def _save_settings(self):
@@ -142,29 +181,21 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
         self.log("Settings saved")
 
     def connect_spotify(self):
-        if not self.sp_client.ensure_client():
-            messagebox.showerror("Spotify Error", "Failed to initialize Spotify client. Set client_id/client_secret in settings.")
-            return
-        self.log("Connected to Spotify")
+        # connect is light-weight; show a quick loading while ensuring client
+        def do_connect():
+            if not self.sp_client.ensure_client():
+                raise RuntimeError("Failed to initialize Spotify client. Set client_id/client_secret in settings.")
+            return True
+        def on_done(_):
+            self.log("Connected to Spotify")
+        self.run_in_background(do_connect, message="Connecting to Spotify...", on_done=on_done)
 
     # -------------- Playlists loading (UI friendly) ------------
-    def _load_playlists_with_ui(self):
-        if not self.sp_client.ensure_client():
-            messagebox.showwarning("Not connected", "Connect to Spotify first.")
-            return
-        self.show_loading("Loading playlists...")
-        threading.Thread(target=self._load_playlists_task, daemon=True).start()
-
     def _load_playlists_task(self):
-        try:
-            playlists = self.sp_client.fetch_user_playlists()
-            self.playlists = playlists
-            self.after(0, lambda: self._update_playlist_ui(len(playlists)))
-        except Exception as e:
-            logger.exception("Failed to load playlists: %s", e)
-            self.after(0, lambda: messagebox.showerror("Error", str(e)))
-        finally:
-            self.after(0, self.hide_loading)
+        playlists = self.sp_client.fetch_user_playlists()
+        self.playlists = playlists
+        # update UI after fetch
+        self.after(0, lambda: self._update_playlist_ui(len(playlists)))
 
     def _update_playlist_ui(self, count: int):
         self.playlist_listbox.delete(0, "end")
@@ -179,44 +210,40 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
             return
         idx = sel[0]
         self.current_playlist = self.playlists[idx]
-        # spawn thread to fetch tracks
-        threading.Thread(target=self._populate_tracks_task, args=(self.current_playlist,), daemon=True).start()
+        # fetch tracks via run_in_background so errors are shown and loading displayed
+        self.run_in_background(self._populate_tracks_task, args=(self.current_playlist,), message="Loading tracks...")
 
     def _populate_tracks_task(self, playlist):
-        try:
-            tracks = self.sp_client.fetch_playlist_items(playlist.get("id"))
-            items = []
-            for t in tracks:
-                album_art_url = None
-                if t.get("album", {}).get("images"):
-                    album_art_url = t["album"]["images"][0].get("url")
-                year = None
-                release_date = t.get("album", {}).get("release_date", "")
-                if release_date:
-                    year = release_date.split("-")[0]
-                items.append({
-                    "title": t.get("name", ""),
-                    "artists": [a.get("name", "") for a in t.get("artists", [])],
-                    "album": t.get("album", {}).get("name", ""),
-                    "duration_ms": t.get("duration_ms", 0),
-                    "album_art_url": album_art_url,
-                    "year": year
-                })
-            # update UI
-            self.track_items.clear()
-            self.after(0, lambda: self.track_listbox.delete(0, "end"))
-            for i, meta in enumerate(items):
-                self.track_items[i] = {"meta": meta, "state": "idle"}
-                display = f"{i+1}. {meta['title']} — {', '.join(meta['artists'])}"
-                self.after(0, lambda d=display: self.track_listbox.insert("end", d))
-            self.log(f"Loaded {len(items)} tracks")
-            if items and items[0].get("album_art_url"):
-                self._load_and_set_album_art(items[0]["album_art_url"])
-            else:
-                self._clear_album_art()
-        except Exception as e:
-            logger.exception("Failed to populate tracks: %s", e)
-            self.after(0, lambda: messagebox.showerror("Error", str(e)))
+        tracks = self.sp_client.fetch_playlist_items(playlist.get("id"))
+        items = []
+        for t in tracks:
+            album_art_url = None
+            if t.get("album", {}).get("images"):
+                album_art_url = t["album"]["images"][0].get("url")
+            year = None
+            release_date = t.get("album", {}).get("release_date", "")
+            if release_date:
+                year = release_date.split("-")[0]
+            items.append({
+                "title": t.get("name", ""),
+                "artists": [a.get("name", "") for a in t.get("artists", [])],
+                "album": t.get("album", {}).get("name", ""),
+                "duration_ms": t.get("duration_ms", 0),
+                "album_art_url": album_art_url,
+                "year": year
+            })
+        # update UI
+        self.track_items.clear()
+        self.after(0, lambda: self.track_listbox.delete(0, "end"))
+        for i, meta in enumerate(items):
+            self.track_items[i] = {"meta": meta, "state": "idle"}
+            display = f"{i+1}. {meta['title']} — {', '.join(meta['artists'])}"
+            self.after(0, lambda d=display: self.track_listbox.insert("end", d))
+        self.log(f"Loaded {len(items)} tracks")
+        if items and items[0].get("album_art_url"):
+            self._load_and_set_album_art(items[0]["album_art_url"])
+        else:
+            self._clear_album_art()
 
     # ---------------- Album art handling -----------------
     def _clear_album_art(self):
@@ -273,18 +300,23 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
 
     # ---------------- Loading modal and bulk download UI -------------
     def show_loading(self, message: str):
+        """Show a small modal loading Toplevel with animated dots (fallback-friendly)."""
         if self._loading_top:
+            # update base message
+            self._loading_message_base = message
             try:
                 self._loading_label.config(text=message)
             except Exception:
                 pass
             return
+
         top = tk.Toplevel(self)
         top.transient(self)
         top.grab_set()
         top.title("")
         top.geometry("300x80")
         top.resizable(False, False)
+        # Center
         try:
             self.update_idletasks()
             x = self.winfo_rootx() + (self.winfo_width() // 2) - 150
@@ -292,19 +324,21 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
             top.geometry(f"+{x}+{y}")
         except Exception:
             pass
+
         lbl = tk.Label(top, text=message, font=("TkDefaultFont", 11))
         lbl.pack(pady=(18, 6))
         self._loading_top = top
         self._loading_label = lbl
         self._loading_dots = 0
+        self._loading_message_base = message
         self._animate_loading()
 
     def _animate_loading(self):
         if not self._loading_top:
             return
-        base = self._loading_label.cget("text").split("...")[0]
         dots = "." * (self._loading_dots % 4)
         try:
+            base = self._loading_message_base
             self._loading_label.config(text=base + dots)
         except Exception:
             pass
@@ -327,6 +361,7 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
             self._loading_top = None
 
     def show_download_progress(self, total: int):
+        """Show a progress window for bulk downloads."""
         if self._download_progress_top:
             return
         top = tk.Toplevel(self)
@@ -341,6 +376,7 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
             top.geometry(f"+{x}+{y}")
         except Exception:
             pass
+
         tk.Label(top, text="Downloading playlist...", font=("TkDefaultFont", 11)).pack(pady=(12, 6))
         if ctk:
             try:
@@ -437,10 +473,37 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
                         self.log("Playlist download complete")
                         self.after(200, self.hide_download_progress)
 
+            elif etype == "ffmpeg_missing":
+                # critical: let the user know immediately and suggest action
+                self.log("FFmpeg missing - please install ffmpeg.")
+                messagebox.showerror("FFmpeg missing", "FFmpeg is required to convert audio. Please install ffmpeg and ensure it's on your PATH.")
             elif etype in ("video_unavailable", "private_video", "download_error", "failed"):
-                status = {"video_unavailable": "Unavailable", "private_video": "Private/Deleted",
-                        "download_error": "DownloadError", "failed": "Failed"}[etype]
-                self.log(f"{status}: {meta.get('title')} ({ev.get('error', '')})")
+                # Informative user-visible message for individual download problems
+                if etype == "video_unavailable":
+                    title = "Video unavailable"
+                    body = f"Track unavailable: {meta.get('title')}"
+                elif etype == "private_video":
+                    title = "Private or deleted video"
+                    body = f"Track private/deleted: {meta.get('title')}"
+                else:
+                    title = "Download error"
+                    body = f"Failed to download '{meta.get('title')}': {ev.get('error', 'Unknown error')}"
+                # Log and show a non-blocking warning to the user
+                self.log(f"{title}: {body}")
+                try:
+                    messagebox.showwarning(title, body)
+                except Exception:
+                    # fallback to logging if messagebox cannot be shown
+                    logger.warning(body)
+
+                # record in history
+                status_map = {
+                    "video_unavailable": "Unavailable",
+                    "private_video": "Private/Deleted",
+                    "download_error": "DownloadError",
+                    "failed": "Failed"
+                }
+                status = status_map.get(etype, "Failed")
                 self.history.setdefault("failed", []).append({
                     "title": meta.get("title", ""),
                     "artist": ", ".join(meta.get("artists", [])),
@@ -449,6 +512,8 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
                     "error": ev.get("error")
                 })
                 save_history(self.history)
+
+                # update bulk progress if active
                 if self._dl_total > 0:
                     self._dl_done += 1
                     try:
@@ -462,9 +527,6 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
                         pass
                     if self._dl_done >= self._dl_total:
                         self.after(200, self.hide_download_progress)
-
-            elif etype == "ffmpeg_missing":
-                self.log("FFmpeg missing - please install ffmpeg.")
             else:
                 self.log(f"Event: {ev}")
         self.after(200, self._poll_event_queue)
