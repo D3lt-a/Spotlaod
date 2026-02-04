@@ -21,6 +21,11 @@ from io import BytesIO
 import tkinter as tk
 from tkinter import messagebox, filedialog, ttk
 
+from .app_state import AppState, TrackInfo
+from .modal_manager import ModalManager
+from .download_controller import DownloadController
+from .widgets.track_item import TrackItemWidget
+
 try:
     import customtkinter as ctk
 except Exception:
@@ -55,10 +60,15 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
         self.skip_existing_var = tk.BooleanVar(value=self.cfg.get("skip_existing", True))
 
         # event queue from downloader
-        self.event_queue: "queue.Queue[dict]" = queue.Queue()
+        # self.event_queue: "queue.Queue[dict]" = queue.Queue()
+        self.state = AppState()
+        self.modal_mgr = ModalManager(self)
+        self.dl_controller = DownloadController(self.cfg, self.state, self.modal_mgr)
         self.downloader = Downloader(self.cfg, self.event_queue)
 
         # UI progress state
+        self.track_items = {}
+        
         self._dl_total = 0
         self._dl_done = 0
         self._download_progress_top: Optional[tk.Toplevel] = None
@@ -101,8 +111,24 @@ class SpotloadApp(ctk.CTk if ctk else tk.Tk):
         ctk.CTkButton(btn_frame, text="Download Playlist (Audio)", command=self.download_playlist_audio).pack(side="left", padx=4)
         ctk.CTkButton(btn_frame, text="Export M3U", command=self._export_playlist_m3u).pack(side="left", padx=4)
 
-        self.track_listbox = tk.Listbox(left)
-        self.track_listbox.pack(fill="both", expand=True, padx=6, pady=6)
+        # self.track_listbox = tk.Listbox(left)
+        # self.track_listbox.pack(fill="both", expand=True, padx=6, pady=6)
+        
+        self.track_frame_container = ttk.Frame(left)
+        self.track_frame_container.pack(fill="both", expand=True, padx=6, pady=6)
+        # helper to repopulate track widgets
+        def refresh_tracks():
+            # clear
+            for child in list(self.track_frame_container.winfo_children()):
+                child.destroy()
+            # create widgets in order from state.tracks (maintain original playlist order if tracked)
+            for tid, t in self.state.tracks.items():
+                tw = TrackItemWidget(self.track_frame_container, t)
+                tw.pack(fill="x", pady=2)
+                self.track_items[tid] = tw
+        # subscribe to state changes so UI refreshes on updates
+        self.state.subscribe_tracks(lambda: self.after(0, refresh_tracks))
+        self.state.subscribe_track_updated(lambda tid: self.after(0, self.track_items.get(tid).refresh(self.state.tracks[tid]) if self.track_items.get(tid) else None))
 
         self.album_art_label = ctk.CTkLabel(right, text="No cover", width=250, height=250)
         self.album_art_label.pack(padx=6, pady=6)
